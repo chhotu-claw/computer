@@ -20,7 +20,7 @@
 		meta?: Record<string, any> | null;
 		done: boolean;
 		output: any[] | null;
-		usage: Record<string, number> | null;
+		usage: Record<string, unknown> | null;
 		chatId: string | null;
 		messageId: string;
 		createdAt?: number | null;
@@ -407,6 +407,36 @@
 		if (Number.isInteger(value)) return value.toLocaleString();
 		return value.toFixed(2);
 	}
+
+	/**
+	 * Flatten usage into displayable rows. Some providers nest breakdowns under
+	 * keys like `input_tokens_details` (an object) — render those as indented
+	 * sub-rows instead of stringifying the object to "[object Object]".
+	 * Zero-valued detail entries are dropped to keep the tooltip readable.
+	 */
+	type UsageRow = { label: string; value: string; sub: boolean };
+	const usageRows = $derived.by((): UsageRow[] => {
+		if (!usage) return [];
+		const rows: UsageRow[] = [];
+		for (const [key, value] of Object.entries(usage)) {
+			if (value && typeof value === 'object') {
+				for (const [subKey, subValue] of Object.entries(value as Record<string, unknown>)) {
+					if (typeof subValue === 'number' && subValue !== 0) {
+						rows.push({
+							label: formatUsageLabel(subKey),
+							value: formatUsageValue(subKey, subValue),
+							sub: true
+						});
+					}
+				}
+			} else if (typeof value === 'number') {
+				rows.push({ label: formatUsageLabel(key), value: formatUsageValue(key, value), sub: false });
+			} else if (typeof value === 'string' && value) {
+				rows.push({ label: formatUsageLabel(key), value: formatUsageLabel(value), sub: false });
+			}
+		}
+		return rows;
+	});
 </script>
 
 <div class="flex flex-col gap-1">
@@ -779,10 +809,10 @@
 									min-w-[10rem] border"
 							>
 								<div class="space-y-0.5">
-									{#each Object.entries(usage) as [key, value]}
+									{#each usageRows as row}
 										<div class="flex justify-between gap-4">
-											<span class="app-muted">{formatUsageLabel(key)}</span>
-											<span class="tabular-nums">{formatUsageValue(key, value)}</span>
+											<span class="app-muted {row.sub ? 'pl-2.5' : ''}">{row.label}</span>
+											<span class="tabular-nums">{row.value}</span>
 										</div>
 									{/each}
 								</div>

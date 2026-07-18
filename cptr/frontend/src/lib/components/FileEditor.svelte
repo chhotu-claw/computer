@@ -1074,6 +1074,13 @@
 		return chars[status] ?? '?';
 	}
 
+	function downloadFile() {
+		const a = document.createElement('a');
+		a.href = `/api/workspace/files/download?path=${encodeURIComponent(filePath)}`;
+		a.download = fileData?.name ?? filePath.split('/').pop() ?? 'download';
+		a.click();
+	}
+
 	onDestroy(() => {
 		destroyEditor();
 		revokeBinaryUrl();
@@ -1175,6 +1182,9 @@
 					>
 				{/if}
 				{#if !isUntitled}
+					<button class="toolbar-btn" onclick={downloadFile} use:tooltip={$t('files.download')}
+						><Icon name="download" size={13} /></button
+					>
 					<button class="toolbar-btn" onclick={() => loadFile(filePath)} use:tooltip={$t('files.refresh')}
 						><Icon name="refresh" size={11} /></button
 					>

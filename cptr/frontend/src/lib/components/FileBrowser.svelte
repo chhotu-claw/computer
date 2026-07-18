@@ -40,10 +40,17 @@
 	}
 
 	let entries = $state<FileEntry[]>([]);
+	// The directory `entries` were actually loaded from. Entry paths are rooted
+	// here (not the live cwd) so stale rows during a navigate→refetch gap keep
+	// correct absolute paths instead of re-rooting at an ever-deeper cwd.
+	let loadedPath = $state('');
 	let loading = $state(false);
 	let initialLoad = $state(true);
 	let fetchTimer: ReturnType<typeof setTimeout> | null = null;
 	let fetching = false;
+	// True while navigating into a different directory — drives the small
+	// loader and gates folder clicks so they can't stack.
+	let navigating = $state(false);
 	let dragExpandTimer: ReturnType<typeof setTimeout> | null = null;
 	let error = $state<string | null>(null);
 	let searchQuery = $state('');
@@ -454,6 +461,9 @@
 		fetchTimer = null;
 		if (fetching) return; // skip overlapping fetches
 		fetching = true;
+		// Show the loader / gate clicks only when changing directories, not for
+		// same-dir background or auto refreshes.
+		if (path !== loadedPath) navigating = true;
 		// Only show the loading spinner on initial load (no entries yet).
 		// Background refreshes silently update entries in-place.
 		const isInitial = entries.length === 0;
@@ -466,16 +476,19 @@
 				entries = showHidden
 					? data.entries
 					: data.entries.filter((e: FileEntry) => !e.name.startsWith('.'));
+				loadedPath = path;
 			}
 		} catch (e: any) {
 			if (path === cwd) {
 				error = e.message || $t('files.failedToLoad');
 				entries = [];
+				loadedPath = path;
 			}
 		} finally {
 			loading = false;
 			initialLoad = false;
 			fetching = false;
+			navigating = false;
 		}
 	}
 
@@ -565,7 +578,9 @@
 		selectedPaths = new Set();
 		lastClickedIndex = index;
 		if (entry.type === 'directory') {
-			// Navigate into the folder
+			// Ignore navigation while a directory load is in flight — the small
+			// loader signals progress and prevents clicks from stacking.
+			if (navigating) return;
 			setFileBrowserCwd(entry.path);
 		} else {
 			openFileTab(entry.path);
@@ -650,7 +665,7 @@
 			}
 		}
 
-		walk(cwd, entries, 0);
+		walk(loadedPath || cwd, entries, 0);
 		return result;
 	});
 
@@ -1242,7 +1257,7 @@
 			</div>
 		{/if}
 
-		{#if loading && initialLoad}
+		{#if (loading && initialLoad) || navigating}
 			<div class="flex items-center justify-center py-12">
 				<Spinner size={16} />
 			</div>

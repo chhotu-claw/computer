@@ -23,6 +23,11 @@ export const ttsVoice = writable<string>('alloy');
 export const ttsFormat = writable<string>('mp3');
 export const ttsPlaybackSpeed = writable<number>(1);
 export const ttsAutoStreamEnabled = writable<boolean>(false);
+
+// True while TTS audio is actively playing (queued or sounding). Voice mode
+// uses this to avoid re-opening the mic while the assistant is still speaking,
+// which otherwise picks up the spoken reply (or a cough) as the next turn.
+export const ttsSpeaking = writable<boolean>(false);
 export const voiceModeSttMode = writable<'browser' | 'provider'>('browser');
 export const ttsPlaybackEnabled = writable<boolean>(
 	typeof localStorage !== 'undefined'

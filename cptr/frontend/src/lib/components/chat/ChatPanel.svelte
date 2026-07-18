@@ -52,7 +52,8 @@
 		ttsAutoStreamEnabled,
 		ttsPlaybackEnabled,
 		ttsVoice,
-		unlockTtsAudioPlayback
+		unlockTtsAudioPlayback,
+		ttsSpeaking
 	} from '$lib/stores/audio';
 
 	import ChatInput from './ChatInput.svelte';
@@ -94,6 +95,8 @@
 	let inputText = $state('');
 	let chatId = $state<string | null>(initialChatId ?? null);
 	let selectedModel = $state('');
+	// Per-chat reasoning effort override. 'default' sends nothing.
+	let selectedEffort = $state('default');
 	let toolApprovalMode = $state<ToolApprovalMode>('auto');
 	let planMode = $state(false);
 	let requestParams = $state<Record<string, unknown>>({});
@@ -722,6 +725,7 @@
 		planMode = false;
 		requestParams = {};
 		voiceModeEnabled = false;
+		selectedEffort = 'default';
 	}
 
 	function loadChatSettings(meta: Record<string, any> | null) {
@@ -739,6 +743,9 @@
 		if (params.request_params && typeof params.request_params === 'object') {
 			requestParams = params.request_params;
 		}
+		// Restore the per-chat reasoning effort so reloading shows the current setting.
+		const savedEffort = params.request_params?.reasoning_effort;
+		selectedEffort = typeof savedEffort === 'string' ? savedEffort : 'default';
 		voiceModeEnabled = params.voice_mode === true;
 		const models = get(chatModels);
 		if (
@@ -900,10 +907,17 @@
 	// ── Actions ─────────────────────────────────────────────────
 
 	function getChatSendParams(): ChatSendParams {
+		// Per-chat reasoning effort overrides the request body. 'default' adds nothing.
+		const requestParamsOut = { ...requestParams };
+		if (selectedEffort && selectedEffort !== 'default') {
+			requestParamsOut.reasoning_effort = selectedEffort;
+		} else {
+			delete requestParamsOut.reasoning_effort;
+		}
 		const params: ChatSendParams = {
 			tool_approval_mode: toolApprovalMode,
 			plan_mode: planMode,
-			request_params: requestParams
+			request_params: requestParamsOut
 		};
 		if (voiceModeEnabled) params.voice_mode = true;
 		return params;
@@ -1459,6 +1473,7 @@
 		}
 		ttsPlaying = false;
 		speakingMessageId = null;
+		ttsSpeaking.set(false);
 	}
 
 	function stripCodeFenceDelta(delta: string): string {
@@ -1532,6 +1547,7 @@
 	}
 
 	function enqueueSpeech(text: string) {
+		ttsSpeaking.set(true);
 		ttsQueue = [...ttsQueue, text];
 		scheduleTtsPrepare(ttsGeneration);
 		if (!ttsPlaying) void playTtsQueue(ttsGeneration);
@@ -1729,6 +1745,7 @@
 			if (generation === ttsGeneration) ttsPlaying = false;
 			if (generation === ttsGeneration) speakingMessageId = null;
 			if (generation === ttsGeneration) ttsStopRequested = false;
+			if (generation === ttsGeneration) ttsSpeaking.set(false);
 			if (generation === ttsGeneration && !voiceModeEnabled) ttsPlaybackEnabled.set(false);
 		}
 	}
@@ -1785,6 +1802,7 @@
 					bind:this={chatInputEl}
 					bind:inputText
 					bind:selectedModel
+					bind:selectedEffort
 					bind:toolApprovalMode
 					bind:planMode
 					bind:requestParams
@@ -1912,6 +1930,7 @@
 					bind:this={chatInputEl}
 					bind:inputText
 					bind:selectedModel
+					bind:selectedEffort
 					bind:toolApprovalMode
 					bind:planMode
 					bind:requestParams

@@ -5,7 +5,7 @@
 @custom-variant hover (&:hover);
 
 @theme {
-	--font-sans: 'Inter', -apple-system, BlinkMacSystemFont, ui-sans-serif, system-ui, sans-serif;
+	--font-sans: 'Geist', 'Inter', -apple-system, BlinkMacSystemFont, ui-sans-serif, system-ui, sans-serif;
 	--font-mono: 'JetBrains Mono', 'Fira Code', ui-monospace, monospace;
 
 	/* Keep Tailwind's neutral utilities on the selected appearance. */
@@ -34,6 +34,22 @@
 	--app-hover: color-mix(in oklab, var(--app-fg) 6%, transparent);
 	--app-active: color-mix(in oklab, var(--app-fg) 7%, transparent);
 	--app-ui-font: var(--font-sans);
+}
+
+/*
+ * "Dim" theme: a soft, non-OLED dark mode. `--app-bg` (#181818) and `--app-fg`
+ * are set by applyAppearance() in appearance.ts (single source of truth), and
+ * the whole gray palette auto-derives from them via the color-mix() tokens in
+ * @theme above — so pitch-black surfaces become soft greys automatically.
+ *
+ * This class only adds the DELTA that JS can't express: a two-tone shell where
+ * the left sidebar sits on a slightly lighter surface than the main/chat area,
+ * giving the familiar layered-grey (Gmail-dark) look. `.sidebar` background is
+ * `var(--app-bg)`, so overriding it here (READ-ONLY w.r.t. Sidebar.svelte)
+ * lifts just that surface. Pure-black dark mode is untouched.
+ */
+html.theme-dim .sidebar {
+	background: color-mix(in oklab, var(--app-bg) 92%, var(--app-fg));
 }
 
 @layer base {

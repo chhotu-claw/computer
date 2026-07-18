@@ -3,7 +3,11 @@
 	import {
 		workspaceList,
 		removeWorkspace,
-		reorderWorkspaces,
+		reorderWorkspacesInSection,
+		pinnedWorkspaces,
+		allWorkspacesExpanded,
+		pinnedExpanded,
+		togglePinWorkspace,
 		sidebarOpen,
 		activeTab,
 		currentWorkspace
@@ -32,10 +36,16 @@
 	let wsMenuPath = $state<string | null>(null);
 	let wsMenuAnchor = $state<HTMLElement | null>(null);
 	let chatMenu = $state<{ chatId: string; wsPath: string; anchor: HTMLElement } | null>(null);
-	let wsListEl: HTMLDivElement | undefined = $state();
-	let sortable: Sortable | null = null;
+	let pinnedListEl: HTMLDivElement | undefined = $state();
+	let unpinnedListEl: HTMLDivElement | undefined = $state();
 	let unbindSocketListener: (() => void) | null = null;
-	let workspacesExpanded = $state(true);
+
+	// ── Pinned vs. unpinned sections ────────────────────────────
+	// Pinned rows render in a separate section above the main list; both are
+	// slices of the same $workspaceList so per-section drag stays independent.
+	let pinnedSet = $derived(new Set($pinnedWorkspaces));
+	let pinnedWs = $derived($workspaceList.filter((w) => pinnedSet.has(w.path)));
+	let unpinnedWs = $derived($workspaceList.filter((w) => !pinnedSet.has(w.path)));
 
 	let expandedWorkspaces = $state<Set<string>>(new Set());
 	let wsChatsCache = $state<Map<string, ChatInfo[]>>(new Map());
@@ -123,6 +133,14 @@
 		closeMobileSidebar();
 	}
 
+	function toggleAllWorkspaces() {
+		allWorkspacesExpanded.set(!$allWorkspacesExpanded);
+	}
+
+	function togglePinned() {
+		pinnedExpanded.set(!$pinnedExpanded);
+	}
+
 	function openWsMenu(e: MouseEvent, path: string) {
 		e.stopPropagation();
 		e.preventDefault();
@@ -134,6 +152,11 @@
 	function closeWsMenu() {
 		wsMenuPath = null;
 		wsMenuAnchor = null;
+	}
+
+	function handleTogglePin(path: string) {
+		closeWsMenu();
+		togglePinWorkspace(path);
 	}
 
 	function openChatMenu(e: MouseEvent, chatId: string, wsPath: string) {
@@ -268,6 +291,78 @@
 		) {
 			reloadWorkspaceChats(data.workspace);
 		}
+
+		// Project-less (Home) chat events carry no workspace — refresh that list.
+		if (!data.workspace && homeExpanded) void fetchHomeChats();
+	}
+
+	// ── Home (project-less) chats ───────────────────────────────
+	// Non-project chats live under DATA_DIR/chats (workspace=None). List them in
+	// their own collapsible section below the workspaces so ad-hoc conversations
+	// are reachable from the sidebar, not just the home screen.
+	let homeChats = $state<ChatInfo[]>([]);
+	let homeChatsLoading = $state(false);
+	let homeChatsHasMore = $state(false);
+	let homeExpanded = $state(true);
+	let homeChatMenu = $state<{ chatId: string; anchor: HTMLElement } | null>(null);
+
+	async function fetchHomeChats(append = false) {
+		if (homeChatsLoading) return;
+		homeChatsLoading = true;
+		try {
+			const data = await getChats(undefined, 10, append ? homeChats.length : 0, 'updated_at', 'desc');
+			homeChats = append ? [...homeChats, ...data.chats] : data.chats;
+			homeChatsHasMore = data.has_more;
+		} catch {
+			if (!append) homeChats = [];
+		} finally {
+			homeChatsLoading = false;
+		}
+	}
+
+	function toggleHomeExpand() {
+		homeExpanded = !homeExpanded;
+		if (homeExpanded && homeChats.length === 0) void fetchHomeChats();
+	}
+
+	function openHomeChat(chatId: string) {
+		goto(`/?chatId=${encodeURIComponent(chatId)}`);
+		closeMobileSidebar();
+	}
+
+	function newHomeChat() {
+		goto('/');
+		closeMobileSidebar();
+	}
+
+	function openHomeChatMenu(e: MouseEvent, chatId: string) {
+		e.stopPropagation();
+		closeWsMenu();
+		closeChatMenu();
+		homeChatMenu = { chatId, anchor: e.currentTarget as HTMLElement };
+	}
+
+	function closeHomeChatMenu() {
+		homeChatMenu = null;
+	}
+
+	async function handleDeleteHomeChat() {
+		if (!homeChatMenu) return;
+		const { chatId } = homeChatMenu;
+		closeHomeChatMenu();
+		await apiDeleteChat(chatId);
+		homeChats = homeChats.filter((chat) => chat.id !== chatId);
+		if (!currentPath && currentChatId === chatId) goto('/');
+	}
+
+	async function handleRenameHomeChat() {
+		if (!homeChatMenu) return;
+		const { chatId } = homeChatMenu;
+		const chat = homeChats.find((item) => item.id === chatId);
+		const title = window.prompt($t('files.rename'), chat?.title)?.trim();
+		if (!title || title === chat?.title) return;
+		await updateChatTitle(chatId, title);
+		homeChats = homeChats.map((item) => (item.id === chatId ? { ...item, title } : item));
 	}
 
 	function isTouchDevice(): boolean {
@@ -276,180 +371,326 @@
 		);
 	}
 
-	onMount(() => {
-		if (wsListEl && !isTouchDevice()) {
-			sortable = Sortable.create(wsListEl, {
-				animation: 150,
-				ghostClass: 'opacity-30',
-				dragClass: 'cursor-grabbing',
-				direction: 'vertical',
-				onEnd: (evt) => {
-					if (evt.oldIndex != null && evt.newIndex != null && evt.oldIndex !== evt.newIndex) {
-						reorderWorkspaces(evt.oldIndex, evt.newIndex);
-					}
-				}
-			});
+	// Auto-expand every workspace on first load so chat lists are visible by
+	// default. One-time guard: after the initial expand, manual collapse sticks.
+	let didInitExpand = false;
+	$effect(() => {
+		if (!$chatEnabled) return;
+		const list = $workspaceList;
+		if (didInitExpand || list.length === 0) return;
+		didInitExpand = true;
+		const next = new Set(expandedWorkspaces);
+		for (const ws of list) {
+			next.add(ws.path);
+			if (!wsChatsCache.has(ws.path)) fetchWorkspaceChats(ws.path);
 		}
+		expandedWorkspaces = next;
+	});
 
+	// Per-section drag reorder. `inPinnedSection` selects which global slice
+	// moves; cross-section drags are disabled (each list is its own group).
+	function makeSortable(el: HTMLDivElement, inPinnedSection: boolean): Sortable {
+		return Sortable.create(el, {
+			animation: 150,
+			ghostClass: 'opacity-30',
+			dragClass: 'cursor-grabbing',
+			direction: 'vertical',
+			onEnd: (evt) => {
+				if (evt.oldIndex != null && evt.newIndex != null && evt.oldIndex !== evt.newIndex) {
+					reorderWorkspacesInSection(inPinnedSection, evt.oldIndex, evt.newIndex);
+				}
+			}
+		});
+	}
+
+	// Attach a Sortable to each section as its element mounts/unmounts. Each
+	// list is only in the DOM while its section is expanded, so effects (not
+	// onMount) keep the drag handles in sync.
+	$effect(() => {
+		if (isTouchDevice() || !pinnedListEl) return;
+		const s = makeSortable(pinnedListEl, true);
+		return () => s.destroy();
+	});
+	$effect(() => {
+		if (isTouchDevice() || !unpinnedListEl) return;
+		const s = makeSortable(unpinnedListEl, false);
+		return () => s.destroy();
+	});
+
+	onMount(() => {
 		unbindSocketListener = socketStore.on('events:chat', handleChatEvent);
+		if ($chatEnabled) void fetchHomeChats();
 	});
 
 	onDestroy(() => {
-		sortable?.destroy();
 		unbindSocketListener?.();
 		unbindSocketListener = null;
 	});
 </script>
 
-<div class="flex items-center justify-between h-8 pl-3.5 pr-1.5 shrink-0">
-	<button
-		class="group flex flex-1 h-full items-center gap-1 text-left text-xs text-gray-400 hover:text-gray-500 dark:text-gray-500 dark:hover:text-gray-400 transition-colors duration-100"
-		onclick={() => (workspacesExpanded = !workspacesExpanded)}
-		aria-expanded={workspacesExpanded}
-		aria-controls="workspace-list"
-	>
-		<span>{$t('sidebar.workspaces')}</span>
-		<span
-			class="flex opacity-0 group-hover:opacity-100 transition-all duration-100"
-			style="transform: rotate({workspacesExpanded ? '90deg' : '0deg'})"
+<!-- One workspace row (name + hover controls + collapsible chat list) -->
+{#snippet workspaceRow(ws: { path: string; name: string; unread_count: number })}
+	{@const isExpanded = expandedWorkspaces.has(ws.path)}
+	{@const chats = wsChatsCache.get(ws.path)}
+	{@const hasMoreChats = wsChatsHasMore.get(ws.path)}
+	{@const isLoading = wsChatsLoading.has(ws.path)}
+	<div class="ws-item">
+		<div
+			class="group flex items-center gap-2.5 w-full h-8 px-2 rounded-lg text-[0.8125rem] font-medium transition-colors duration-100
+			{ws.path === currentPath
+				? 'bg-black/[0.04] text-gray-900 dark:bg-white/[0.055] dark:text-white'
+				: 'text-gray-700 hover:text-gray-900 hover:bg-black/[0.025] dark:text-gray-300 dark:hover:text-white dark:hover:bg-white/[0.03]'}"
 		>
-			<Icon name="chevron-right" size={11} />
-		</span>
-	</button>
-	<button
-		class="flex items-center justify-center w-7 h-7 rounded-lg text-gray-300 hover:text-gray-500 dark:text-gray-600 dark:hover:text-gray-400 transition-colors duration-100"
-		onclick={onaddworkspace}
-		aria-label={$t('sidebar.addWorkspace')}
-		use:tooltip={$t('sidebar.addWorkspace')}
-	>
-		<Icon name="plus" size={14} />
-	</button>
-</div>
-
-<div
-	id="workspace-list"
-	bind:this={wsListEl}
-	class="flex-1 overflow-y-auto px-1.5"
-	class:invisible={!workspacesExpanded}
->
-	{#each $workspaceList as ws (ws.path)}
-		{@const isExpanded = expandedWorkspaces.has(ws.path)}
-		{@const chats = wsChatsCache.get(ws.path)}
-		{@const hasMoreChats = wsChatsHasMore.get(ws.path)}
-		{@const isLoading = wsChatsLoading.has(ws.path)}
-		<div class="ws-item">
-			<div
-				class="group flex items-center gap-1 w-full h-7 px-2 rounded-lg text-xs font-medium transition-colors duration-100
-				{ws.path === currentPath
-					? 'bg-gray-200/50 text-gray-900 dark:bg-white/8 dark:text-white'
-					: 'text-gray-500 hover:text-gray-700 dark:hover:text-gray-300'}"
+			<a
+				href="/?workspace={encodeURIComponent(ws.path)}"
+				class="flex items-center gap-1 flex-1 min-w-0 no-underline text-inherit"
+				onclick={(e) => openWorkspace(e, ws.path)}
 			>
-				<a
-					href="/?workspace={encodeURIComponent(ws.path)}"
-					class="flex items-center gap-1.5 flex-1 min-w-0 no-underline text-inherit"
-					onclick={(e) => openWorkspace(e, ws.path)}
-				>
-					{#if $chatEnabled}
-						<span
-							class="ws-icon-toggle shrink-0"
-							role="button"
-							tabindex="-1"
-							onclick={(e) => {
-								e.stopPropagation();
-								e.preventDefault();
-								toggleWorkspaceExpand(ws.path);
-							}}
-							aria-label={isExpanded ? $t('sidebar.collapse') : $t('sidebar.addWorkspace')}
-						>
-							<span class="ws-icon-folder"><Icon name="folder" size={14} /></span>
-							<span
-								class="ws-icon-chevron"
-								style="transform: rotate({isExpanded ? '90deg' : '0deg'})"
-							>
-								<Icon name="chevron-right" size={11} />
-							</span>
-						</span>
-					{:else}
-						<Icon name="folder" size={14} />
-					{/if}
-					<span class="min-w-0 truncate text-left">{ws.name}</span>
-					{#if ws.unread_count > 0}
-						<span
-							class="inline-flex h-4 min-w-4 shrink-0 items-center justify-center rounded-md bg-sky-500/10 px-1 text-[0.625rem] font-semibold text-sky-600 dark:bg-sky-400/10 dark:text-sky-300"
-						>
-							{new Intl.NumberFormat(undefined, {
-								notation: 'compact',
-								compactDisplay: 'short'
-							}).format(ws.unread_count)}
-						</span>
-					{/if}
-				</a>
-				<span
-					class="flex items-center justify-center w-4 h-4 shrink-0 text-gray-400 opacity-0 group-hover:opacity-100 hover:text-gray-600 dark:hover:text-gray-300 transition-all duration-75"
-					role="button"
-					tabindex="-1"
-					onclick={(e) => openWsMenu(e, ws.path)}
-					aria-label={$t('sidebar.workspaceOptions')}
-				>
-					<Icon name="three-dots" size={11} />
-				</span>
+				<!-- Icon: folder by default, chevron on hover (when chat enabled) -->
 				{#if $chatEnabled}
 					<span
-						class="flex items-center justify-center w-4 h-4 shrink-0 text-gray-400 opacity-0 group-hover:opacity-100 hover:text-gray-600 dark:hover:text-gray-300 transition-all duration-75"
+						class="ws-icon-toggle shrink-0"
 						role="button"
 						tabindex="-1"
-						onclick={() => newChat(ws.path)}
-						aria-label={$t('bar.newChat')}
-						use:tooltip={$t('bar.newChat')}
+						onclick={(e) => {
+							e.stopPropagation();
+							e.preventDefault();
+							toggleWorkspaceExpand(ws.path);
+						}}
+						aria-label={isExpanded ? $t('sidebar.collapse') : $t('sidebar.addWorkspace')}
 					>
-						<Icon name="pencil" size={11} />
+						<span class="ws-icon-folder"><Icon name="folder" size={16} /></span>
+						<span
+							class="ws-icon-chevron"
+							style="transform: rotate({isExpanded ? '90deg' : '0deg'})"
+						>
+							<Icon name="chevron-right" size={11} />
+						</span>
+					</span>
+				{:else}
+					<Icon name="folder" size={16} />
+				{/if}
+				<span class="min-w-0 truncate text-left">{ws.name}</span>
+				{#if ws.unread_count > 0}
+					<span
+						class="inline-flex h-4 min-w-4 shrink-0 items-center justify-center rounded-md bg-sky-500/10 px-1 text-[0.625rem] font-semibold text-sky-600 dark:bg-sky-400/10 dark:text-sky-300"
+					>
+						{new Intl.NumberFormat(undefined, {
+							notation: 'compact',
+							compactDisplay: 'short'
+						}).format(ws.unread_count)}
 					</span>
 				{/if}
-			</div>
-
-			{#if $chatEnabled && isExpanded}
-				<div class="ws-chats">
-					{#if isLoading && !chats}
-						<div class="ws-chat-loading">
-							<span class="ws-chat-loading-dot"></span>
-							<span class="ws-chat-loading-dot"></span>
-							<span class="ws-chat-loading-dot"></span>
-						</div>
-					{:else if chats && chats.length > 0}
-						{#each chats as chat (chat.id)}
-							<ChatItem
-								{chat}
-								isSelected={chat.id === currentChatId}
-								onclick={() => openChat(chat.id, ws.path)}
-								onmenu={(e) => openChatMenu(e, chat.id, ws.path)}
-							/>
-						{/each}
-						{#if hasMoreChats}
-							<button
-								class="ws-chat-show-more"
-								disabled={isLoading}
-								onclick={() => fetchWorkspaceChats(ws.path, true)}
-							>
-								{$t('sidebar.showMore')}
-							</button>
-						{/if}
-					{/if}
-				</div>
+			</a>
+			<span
+				class="flex items-center justify-center w-4 h-4 shrink-0 text-gray-400 opacity-0 group-hover:opacity-100 hover:text-gray-600 dark:hover:text-gray-300 transition-all duration-75 cursor-pointer"
+				role="button"
+				tabindex="-1"
+				onclick={(e) => openWsMenu(e, ws.path)}
+				aria-label={$t('sidebar.workspaceOptions')}
+			>
+				<Icon name="three-dots" size={11} />
+			</span>
+			{#if $chatEnabled}
+				<span
+					class="flex items-center justify-center w-4 h-4 shrink-0 text-gray-400 opacity-0 group-hover:opacity-100 hover:text-gray-600 dark:hover:text-gray-300 transition-all duration-75 cursor-pointer"
+					role="button"
+					tabindex="-1"
+					onclick={() => newChat(ws.path)}
+					aria-label={$t('bar.newChat')}
+					use:tooltip={$t('bar.newChat')}
+				>
+					<Icon name="pencil" size={11} />
+				</span>
 			{/if}
 		</div>
-	{/each}
+
+		<!-- Collapsible chat list -->
+		{#if $chatEnabled && isExpanded}
+			<div class="ws-chats nested">
+				{#if isLoading && !chats}
+					<div class="ws-chat-loading">
+						<span class="ws-chat-loading-dot"></span>
+						<span class="ws-chat-loading-dot"></span>
+						<span class="ws-chat-loading-dot"></span>
+					</div>
+				{:else if chats && chats.length > 0}
+					{#each chats as chat (chat.id)}
+						<ChatItem
+							{chat}
+							isSelected={chat.id === currentChatId}
+							onclick={() => openChat(chat.id, ws.path)}
+							onmenu={(e) => openChatMenu(e, chat.id, ws.path)}
+						/>
+					{/each}
+					{#if hasMoreChats}
+						<button
+							class="ws-chat-show-more"
+							disabled={isLoading}
+							onclick={() => fetchWorkspaceChats(ws.path, true)}
+						>
+							{$t('sidebar.showMore')}
+						</button>
+					{/if}
+				{/if}
+			</div>
+		{/if}
+	</div>
+{/snippet}
+
+<!-- Workspace list -->
+<div class="flex-1 overflow-y-auto px-1.5">
+	<!-- Pinned workspaces above the section header. The list div is only in the
+	     DOM while expanded, so its Sortable attaches/detaches with it. -->
+	{#if pinnedWs.length > 0}
+		<div class="flex items-center h-8 mt-1">
+			<button
+				class="ws-header-toggle"
+				onclick={togglePinned}
+				aria-expanded={$pinnedExpanded}
+				aria-controls="pinned-list"
+			>
+				<span>{$t('sidebar.pinned')}</span>
+				<span
+					class="ws-header-chevron"
+					style="transform: rotate({$pinnedExpanded ? '90deg' : '0deg'})"
+				>
+					<Icon name="chevron-right" size={11} />
+				</span>
+				{#if !$pinnedExpanded}
+					<span class="ws-header-count">{pinnedWs.length}</span>
+				{/if}
+			</button>
+		</div>
+		{#if $pinnedExpanded}
+			<div id="pinned-list" bind:this={pinnedListEl} class="ws-section">
+				{#each pinnedWs as ws (ws.path)}
+					{@render workspaceRow(ws)}
+				{/each}
+			</div>
+		{/if}
+	{/if}
+
+	<!-- Section header doubles as the collapse toggle for the (unpinned)
+	     workspace list; collapsing leaves only the pinned section above. -->
+	<div class="flex items-center h-8 mt-1">
+		<button
+			class="ws-header-toggle"
+			onclick={toggleAllWorkspaces}
+			aria-expanded={$allWorkspacesExpanded}
+			aria-controls="workspace-list"
+		>
+			<span>{$t('sidebar.workspaces')}</span>
+			<span
+				class="ws-header-chevron"
+				style="transform: rotate({$allWorkspacesExpanded ? '90deg' : '0deg'})"
+			>
+				<Icon name="chevron-right" size={11} />
+			</span>
+			{#if !$allWorkspacesExpanded && unpinnedWs.length > 0}
+				<span class="ws-header-count">{unpinnedWs.length}</span>
+			{/if}
+		</button>
+		<button
+			class="flex items-center justify-center w-7 h-7 rounded-lg text-gray-300 hover:text-gray-500 dark:text-gray-600 dark:hover:text-gray-400 transition-colors duration-100 shrink-0"
+			onclick={onaddworkspace}
+			aria-label={$t('sidebar.addWorkspace')}
+			use:tooltip={$t('sidebar.addWorkspace')}
+		>
+			<Icon name="plus" size={14} />
+		</button>
+	</div>
+
+	{#if $allWorkspacesExpanded}
+		<div id="workspace-list" bind:this={unpinnedListEl} class="ws-section">
+			{#each unpinnedWs as ws (ws.path)}
+				{@render workspaceRow(ws)}
+			{/each}
+		</div>
+	{/if}
 
 	{#if $workspaceList.length === 0}
 		<div class="flex flex-col items-center justify-center py-12">
 			<p class="text-xs text-gray-400 dark:text-gray-600">{$t('sidebar.noWorkspaces')}</p>
 		</div>
 	{/if}
+
+	<!-- Home (project-less) chats: reachable from the sidebar, not just Home. -->
+	{#if $chatEnabled}
+		<div class="flex items-center h-8 mt-1">
+			<button
+				class="ws-header-toggle"
+				onclick={toggleHomeExpand}
+				aria-expanded={homeExpanded}
+				aria-controls="home-chats-list"
+			>
+				<span>{$t('sidebar.chats')}</span>
+				<span
+					class="ws-header-chevron"
+					style="transform: rotate({homeExpanded ? '90deg' : '0deg'})"
+				>
+					<Icon name="chevron-right" size={11} />
+				</span>
+				{#if !homeExpanded && homeChats.length > 0}
+					<span class="ws-header-count">{homeChats.length}</span>
+				{/if}
+			</button>
+			<button
+				class="flex items-center justify-center w-7 h-7 rounded-lg text-gray-300 hover:text-gray-500 dark:text-gray-600 dark:hover:text-gray-400 transition-colors duration-100 shrink-0"
+				onclick={newHomeChat}
+				aria-label={$t('bar.newChat')}
+				use:tooltip={$t('bar.newChat')}
+			>
+				<Icon name="pencil" size={14} />
+			</button>
+		</div>
+
+		{#if homeExpanded}
+			<div id="home-chats-list">
+				{#if homeChatsLoading && homeChats.length === 0}
+					<div class="ws-chats">
+						<div class="ws-chat-loading">
+							<span class="ws-chat-loading-dot"></span>
+							<span class="ws-chat-loading-dot"></span>
+							<span class="ws-chat-loading-dot"></span>
+						</div>
+					</div>
+				{:else if homeChats.length > 0}
+					<div class="ws-chats">
+						{#each homeChats as chat (chat.id)}
+							<ChatItem
+								{chat}
+								isSelected={!currentPath && chat.id === currentChatId}
+								onclick={() => openHomeChat(chat.id)}
+								onmenu={(e) => openHomeChatMenu(e, chat.id)}
+							/>
+						{/each}
+						{#if homeChatsHasMore}
+							<button
+								class="ws-chat-show-more"
+								disabled={homeChatsLoading}
+								onclick={() => fetchHomeChats(true)}
+							>
+								{$t('sidebar.showMore')}
+							</button>
+						{/if}
+					</div>
+				{/if}
+			</div>
+		{/if}
+	{/if}
 </div>
 
 {#if wsMenuPath && wsMenuAnchor}
+	{@const menuPinned = pinnedSet.has(wsMenuPath)}
 	<DropdownMenu
 		anchor={wsMenuAnchor}
 		items={[
+			{
+				label: menuPinned ? $t('sidebar.unpin') : $t('sidebar.pin'),
+				icon: 'pin',
+				onclick: () => handleTogglePin(wsMenuPath!)
+			},
 			{
 				label: $t('sidebar.remove'),
 				icon: 'xmark',
@@ -485,6 +726,26 @@
 	/>
 {/if}
 
+{#if homeChatMenu}
+	<DropdownMenu
+		anchor={homeChatMenu.anchor}
+		align="end"
+		items={[
+			{
+				label: $t('files.rename'),
+				icon: 'pencil',
+				onclick: handleRenameHomeChat
+			},
+			{
+				label: $t('chat.history.delete'),
+				icon: 'trash',
+				onclick: handleDeleteHomeChat
+			}
+		]}
+		onclose={closeHomeChatMenu}
+	/>
+{/if}
+
 <style>
 	@reference "../../app.css";
 
@@ -492,13 +753,54 @@
 		margin-bottom: 0.125rem;
 	}
 
-	.ws-icon-toggle {
-		position: relative;
+	/* ── Section disclosure header (Pinned / Workspaces) ────────── */
+	/* Quiet, muted styling — deliberately less prominent than a workspace row
+	   so it reads as a divider. Same type size as items (Codex-style): hierarchy
+	   comes from dimmed color and the air above each section, not font size. */
+	.ws-header-toggle {
+		display: flex;
+		align-items: center;
+		gap: 0.25rem;
+		flex: 1;
+		min-width: 0;
+		height: 2rem;
+		padding: 0 0.5rem;
+		border: none;
+		background: none;
+		cursor: pointer;
+		font-size: 0.75rem;
+		text-align: left;
+		color: var(--app-fg-muted, #9ca3af);
+		transition: color 0.1s;
+	}
+
+	.ws-header-toggle:hover {
+		color: var(--app-fg, #6b7280);
+	}
+
+	.ws-header-chevron {
 		display: flex;
 		align-items: center;
 		justify-content: center;
 		width: 0.875rem;
 		height: 0.875rem;
+		opacity: 0.8;
+		transition: transform 0.1s;
+	}
+
+	.ws-header-count {
+		font-variant-numeric: tabular-nums;
+		font-size: 0.625rem;
+		opacity: 0.7;
+	}
+
+	.ws-icon-toggle {
+		position: relative;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		width: 1rem;
+		height: 1rem;
 		cursor: pointer;
 	}
 
@@ -535,6 +837,12 @@
 	.ws-chats {
 		margin-top: 0.125rem;
 		padding-bottom: 0.25rem;
+	}
+
+	/* Nest chats under the workspace label (align with the folder icon). */
+	.ws-chats.nested {
+		margin-left: 0.5rem;
+		padding-left: 0.5rem;
 	}
 
 	.ws-chat-show-more {
