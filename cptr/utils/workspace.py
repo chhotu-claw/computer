@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from cptr import env
+from cptr.env import SCRATCH_DIR
 from cptr.utils.config import load_config
 
 
@@ -21,6 +22,31 @@ def auto_gitignore_cptr_enabled() -> bool:
     if isinstance(app_config, dict):
         value = app_config.get("workspace.auto_gitignore_dot_cptr", value)
     return _bool_config(value, default=True)
+
+
+def ensure_scratch_dir(chat_id: str) -> str:
+    """Return the isolated scratch working directory for a project-less chat.
+
+    Each Home chat gets its own dir (scratch/<chat_id>) so ad-hoc chats never
+    collide and any one can later be promoted into a real project. Created
+    lazily. Used as the tool/agent cwd so run_command, file ops, artifacts,
+    task logs and screenshots have a real, isolated directory to operate in
+    instead of the server's process cwd.
+    """
+    d = SCRATCH_DIR / chat_id
+    d.mkdir(parents=True, exist_ok=True)
+    return str(d)
+
+
+def resolve_tool_cwd(workspace: str | None, chat_id: str) -> str:
+    """Resolve the working directory tools and agents should use for a chat.
+
+    Returns the workspace path when the chat has one, otherwise the chat's
+    isolated scratch directory (Home chats).
+    """
+    if workspace and str(workspace).strip():
+        return str(workspace)
+    return ensure_scratch_dir(chat_id)
 
 
 def ensure_cptr_gitignored(workspace: str | Path) -> None:

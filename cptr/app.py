@@ -131,6 +131,20 @@ async def lifespan(app: FastAPI):
 app = FastAPI(lifespan=lifespan)
 
 
+# SvelteKit emits hashed (content-addressed) files under /_app/immutable/, so
+# they can be cached forever. The service worker script must never be cached or
+# PWAs get stuck on a stale worker.
+@app.middleware("http")
+async def immutable_asset_cache(request: Request, call_next):
+    response = await call_next(request)
+    path = request.url.path
+    if path.startswith("/_app/immutable/"):
+        response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+    elif path == "/service-worker.js":
+        response.headers["Cache-Control"] = "no-cache"
+    return response
+
+
 # Auth middleware
 @app.middleware("http")
 async def auth_middleware(request: Request, call_next):
