@@ -119,9 +119,14 @@ export interface UserPreferences {
 	appearance?: AppearancePreferences;
 	sidebarOpen: boolean;
 	sidebarWidth: number;
+	fileSidebarOpen?: boolean;
+	fileSidebarWidth?: number;
 	toolApprovalMode?: ToolApprovalMode;
 	locale: string;
 	workspaceOrder?: string[]; // ordered paths for sidebar drag-reorder
+	pinnedWorkspaces?: string[]; // paths pinned to the top of the sidebar
+	allWorkspacesExpanded?: boolean; // whether the "All workspaces" section is expanded
+	pinnedExpanded?: boolean; // whether the "Pinned" section is expanded
 	keybindings?: Record<string, string>; // user-customised keyboard shortcuts
 	version?: string; // last seen app version for changelog
 	showUpdateToast?: boolean; // show version update notifications (default true)
@@ -302,6 +307,13 @@ if (typeof window !== 'undefined') {
 	});
 }
 export const sidebarWidth = writable(220);
+
+// Right-docked file browser panel (shown when a workspace is open).
+export const fileSidebarOpen = writable(
+	typeof window !== 'undefined' ? window.innerWidth >= 1024 : false
+);
+export const fileSidebarWidth = writable(300);
+
 export const theme = writable<Theme>('dark');
 export const toolApprovalMode = writable<ToolApprovalMode>('auto');
 export const appVersion = writable('');
@@ -334,6 +346,14 @@ export const expandToolDetails = writable(false);
 
 /** Saved workspace path order for sidebar drag-reorder. */
 export const workspaceOrder = writable<string[]>([]);
+
+/** Paths of workspaces pinned to the top of the sidebar. */
+export const pinnedWorkspaces = writable<string[]>([]);
+
+/** Whether the collapsible "All workspaces" (unpinned) section is expanded. */
+export const allWorkspacesExpanded = writable(true);
+/** Whether the collapsible "Pinned" section is expanded. */
+export const pinnedExpanded = writable(true);
 
 // ── Derived stores ──────────────────────────────────────────────
 
@@ -430,9 +450,14 @@ function persistPreferences(): void {
 			},
 			sidebarOpen: get(sidebarOpen),
 			sidebarWidth: get(sidebarWidth),
+			fileSidebarOpen: get(fileSidebarOpen),
+			fileSidebarWidth: get(fileSidebarWidth),
 			toolApprovalMode: get(toolApprovalMode),
 			locale: i18next.language,
 			workspaceOrder: get(workspaceOrder),
+			pinnedWorkspaces: get(pinnedWorkspaces),
+			allWorkspacesExpanded: get(allWorkspacesExpanded),
+			pinnedExpanded: get(pinnedExpanded),
 			keybindings: get(keybindings),
 			version: get(lastSeenVersion),
 			showUpdateToast: get(showUpdateToastPref),
@@ -468,10 +493,25 @@ function subscribeForPersistence() {
 	sidebarWidth.subscribe(() => {
 		if (get(stateLoaded)) persistPreferences();
 	});
+	fileSidebarOpen.subscribe(() => {
+		if (get(stateLoaded)) persistPreferences();
+	});
+	fileSidebarWidth.subscribe(() => {
+		if (get(stateLoaded)) persistPreferences();
+	});
 	toolApprovalMode.subscribe(() => {
 		if (get(stateLoaded)) persistPreferences();
 	});
 	workspaceOrder.subscribe(() => {
+		if (get(stateLoaded)) persistPreferences();
+	});
+	pinnedWorkspaces.subscribe(() => {
+		if (get(stateLoaded)) persistPreferences();
+	});
+	allWorkspacesExpanded.subscribe(() => {
+		if (get(stateLoaded)) persistPreferences();
+	});
+	pinnedExpanded.subscribe(() => {
 		if (get(stateLoaded)) persistPreferences();
 	});
 	keybindings.subscribe(() => {
@@ -515,6 +555,9 @@ export async function loadPreferences(): Promise<void> {
 		themeConfig.set(sanitizeThemeConfig(appearance.themeConfig));
 		if (prefs.sidebarOpen !== undefined) sidebarOpen.set(prefs.sidebarOpen as boolean);
 		if (prefs.sidebarWidth !== undefined) sidebarWidth.set(prefs.sidebarWidth as number);
+		if (prefs.fileSidebarOpen !== undefined) fileSidebarOpen.set(prefs.fileSidebarOpen as boolean);
+		if (prefs.fileSidebarWidth !== undefined)
+			fileSidebarWidth.set(prefs.fileSidebarWidth as number);
 		if (
 			prefs.toolApprovalMode === 'ask' ||
 			prefs.toolApprovalMode === 'auto' ||
@@ -526,6 +569,11 @@ export async function loadPreferences(): Promise<void> {
 		}
 		if (prefs.locale) changeLocale(prefs.locale as string);
 		if (Array.isArray(prefs.workspaceOrder)) workspaceOrder.set(prefs.workspaceOrder as string[]);
+		if (Array.isArray(prefs.pinnedWorkspaces))
+			pinnedWorkspaces.set(prefs.pinnedWorkspaces as string[]);
+		if (prefs.allWorkspacesExpanded !== undefined)
+			allWorkspacesExpanded.set(prefs.allWorkspacesExpanded as boolean);
+		if (prefs.pinnedExpanded !== undefined) pinnedExpanded.set(prefs.pinnedExpanded as boolean);
 		if (prefs.keybindings) loadKeybindings(prefs.keybindings as Record<string, string>);
 		if (prefs.version) lastSeenVersion.set(prefs.version as string);
 		if (prefs.showUpdateToast !== undefined)
@@ -806,7 +854,7 @@ if (typeof BroadcastChannel !== 'undefined') {
 	};
 
 	theme.subscribe((t) => {
-		if (!_syncingFromBroadcast) {
+		if (!_syncingFromBroadcast && get(stateLoaded)) {
 			channel.postMessage({ type: 'theme', value: t });
 			channel.postMessage({
 				type: 'appearance',
@@ -821,7 +869,7 @@ if (typeof BroadcastChannel !== 'undefined') {
 	});
 
 	themeConfig.subscribe((config) => {
-		if (!_syncingFromBroadcast) {
+		if (!_syncingFromBroadcast && get(stateLoaded)) {
 			channel.postMessage({
 				type: 'appearance',
 				value: {
@@ -835,7 +883,7 @@ if (typeof BroadcastChannel !== 'undefined') {
 	});
 
 	textScale.subscribe((scale) => {
-		if (!_syncingFromBroadcast) {
+		if (!_syncingFromBroadcast && get(stateLoaded)) {
 			channel.postMessage({
 				type: 'appearance',
 				value: {
@@ -866,7 +914,7 @@ if (typeof BroadcastChannel !== 'undefined') {
 	// subscribe to i18next language changes.
 	if (i18next) {
 		i18next.on('languageChanged', (lng: string) => {
-			if (!_syncingFromBroadcast) {
+			if (!_syncingFromBroadcast && get(stateLoaded)) {
 				channel.postMessage({ type: 'locale', value: lng });
 			}
 		});
@@ -902,6 +950,7 @@ export async function removeWorkspace(path: string): Promise<void> {
 	await deleteWs(path);
 	workspaceList.update((list) => list.filter((w) => w.path !== path));
 	workspaceOrder.update((order) => order.filter((p) => p !== path));
+	pinnedWorkspaces.update((pinned) => pinned.filter((p) => p !== path));
 
 	// If this was the current workspace, clear it
 	const ws = get(currentWorkspace);
@@ -920,6 +969,39 @@ export function reorderWorkspaces(oldIndex: number, newIndex: number): void {
 		workspaceOrder.set(reordered.map((w) => w.path));
 		return reordered;
 	});
+}
+
+/**
+ * Reorder workspaces within a single section (pinned or unpinned).
+ * Indices are relative to that section's filtered list. The other section's
+ * items keep their positions in the underlying global order.
+ */
+export function reorderWorkspacesInSection(
+	inPinnedSection: boolean,
+	oldIndex: number,
+	newIndex: number
+): void {
+	const pinnedSet = new Set(get(pinnedWorkspaces));
+	workspaceList.update((list) => {
+		const section = list.filter((w) => pinnedSet.has(w.path) === inPinnedSection);
+		if (oldIndex < 0 || oldIndex >= section.length) return list;
+		const [moved] = section.splice(oldIndex, 1);
+		section.splice(newIndex, 0, moved);
+		// Rebuild the full list, substituting the reordered section into its slots.
+		let si = 0;
+		const rebuilt = list.map((w) =>
+			pinnedSet.has(w.path) === inPinnedSection ? section[si++] : w
+		);
+		workspaceOrder.set(rebuilt.map((w) => w.path));
+		return rebuilt;
+	});
+}
+
+/** Toggle a workspace's pinned state. */
+export function togglePinWorkspace(path: string): void {
+	pinnedWorkspaces.update((pinned) =>
+		pinned.includes(path) ? pinned.filter((p) => p !== path) : [...pinned, path]
+	);
 }
 
 export function updateWorkspace(partial: Partial<WorkspaceState>): void {

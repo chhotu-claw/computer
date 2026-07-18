@@ -6,6 +6,7 @@
 	import { page } from '$app/stores';
 	import Spinner from '$lib/components/common/Spinner.svelte';
 	import Sidebar from '$lib/components/Sidebar.svelte';
+	import FileSidebar from '$lib/components/FileSidebar.svelte';
 	import ShortcutBar from '$lib/components/ShortcutBar.svelte';
 	import GitBar from '$lib/components/GitBar.svelte';
 	import SearchModal from '$lib/components/SearchModal.svelte';
@@ -101,11 +102,10 @@
 		vv?.addEventListener('resize', syncKeyboardInset);
 		vv?.addEventListener('scroll', syncKeyboardInset);
 
-		if (isInstalledPwa()) {
-			registerServiceWorker().catch(() => {});
-		} else {
-			cleanBrowserServiceWorker().catch(() => {});
-		}
+		// Service worker intentionally disabled: this instance always needs the
+		// backend, so a SW adds little and its stale-shell caching has bitten us.
+		// Always clean up any previously-registered worker (installed PWA or not).
+		cleanBrowserServiceWorker().catch(() => {});
 		window.addEventListener('offline', showOfflineToast);
 		window.addEventListener('online', showOnlineToast);
 
@@ -409,7 +409,7 @@
 	<link rel="preconnect" href="https://fonts.googleapis.com" />
 	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="anonymous" />
 	<link
-		href="https://fonts.googleapis.com/css2?family=Inter:wght@300..700&family=JetBrains+Mono:wght@400;500&display=swap"
+		href="https://fonts.googleapis.com/css2?family=Inter:wght@300..700&family=Geist:wght@300..700&family=JetBrains+Mono:wght@400;500&display=swap"
 		rel="stylesheet"
 	/>
 	<title
@@ -473,6 +473,10 @@
 				<ShortcutBar />
 			{/if}
 		</div>
+
+		{#if $currentWorkspace}
+			<FileSidebar />
+		{/if}
 	</div>
 
 	{#if $showSearch}

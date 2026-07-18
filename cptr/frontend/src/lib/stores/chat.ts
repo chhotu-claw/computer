@@ -241,6 +241,8 @@ export interface ChatModel {
 	name: string;
 	provider: string;
 	connection_id: string;
+	/** Configured default reasoning effort (model request_params over global) */
+	default_reasoning_effort?: string;
 }
 
 export const chatModels = writable<ChatModel[]>([]);

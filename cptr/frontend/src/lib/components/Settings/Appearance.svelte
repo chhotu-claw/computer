@@ -280,7 +280,7 @@
 
 		<h3 class="text-xs text-gray-400 dark:text-gray-600 mb-2">{$t('general.theme')}</h3>
 		<div class="flex gap-1">
-			{#each [{ value: 'light' as Theme, label: $t('general.light'), icon: 'sun-light' }, { value: 'dark' as Theme, label: $t('general.dark'), icon: 'half-moon' }, { value: 'system' as Theme, label: $t('general.system'), icon: 'monitor' }] as opt}
+			{#each [{ value: 'light' as Theme, label: $t('general.light'), icon: 'sun-light' }, { value: 'dark' as Theme, label: $t('general.dark'), icon: 'half-moon' }, { value: 'dim' as Theme, label: $t('general.dim'), icon: 'half-moon' }, { value: 'system' as Theme, label: $t('general.system'), icon: 'monitor' }] as opt}
 				<button
 					class="flex items-center gap-1.5 h-7 px-2.5 rounded-lg text-xs transition-colors duration-100
 					{$theme === opt.value

@@ -20,7 +20,7 @@
 		type EditorGroup,
 		type Tab
 	} from '$lib/stores';
-	import { openChatTab } from '$lib/stores';
+	import { openChatTab, fileSidebarOpen } from '$lib/stores';
 	import { chatEnabled, chatStatuses, isChatUnread, streamingChatTabs } from '$lib/stores/chat';
 	import { voiceMemosEnabled, showVoiceMemo } from '$lib/stores/audio';
 	import { keybindings, formatChord } from '$lib/stores/keybindings';
@@ -418,6 +418,15 @@
 					onpointerdown={() => handleTabClick(tab)}
 					onclick={() => handleTabClick(tab)}
 					oncontextmenu={(e) => handleContextMenu(e, tab)}
+					onmousedown={(e) => {
+						if (e.button === 1) e.preventDefault();
+					}}
+					onauxclick={(e) => {
+						if (e.button === 1 && !tab.permanent) {
+							e.preventDefault();
+							handleClose(e, tab.id);
+						}
+					}}
 				>
 					{#if tab.type === 'chat' && (chatStatus?.active || $streamingChatTabs.has(tab.id))}
 						<Spinner size={14} />
@@ -465,6 +474,21 @@
 
 	<!-- Right-side controls -->
 	<div class="flex items-center gap-0.5 shrink-0">
+		<!-- File panel toggle (workspace tabs only) -->
+		{#if !home}
+			<button
+				class="flex items-center justify-center w-7 h-7 rounded-lg transition-colors duration-100 shrink-0
+					{$fileSidebarOpen
+					? 'bg-gray-200/50 text-gray-900 dark:bg-white/8 dark:text-white'
+					: 'text-gray-400 hover:text-gray-600 dark:hover:text-gray-300'}"
+				onclick={() => fileSidebarOpen.set(!$fileSidebarOpen)}
+				aria-label={$t('files.toggleFilePanel')}
+				use:tooltip={$t('files.toggleFilePanel')}
+			>
+				<Icon name="folder" size={14} />
+			</button>
+		{/if}
+
 		<!-- Split button (wide screens) -->
 		{#if isWideScreen}
 			<button

@@ -44,8 +44,10 @@
 
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <div
-	class="flex items-center gap-1.5 w-full h-7 px-2 rounded-lg cursor-pointer transition-colors duration-75
-		hover:bg-gray-50/50 dark:hover:bg-white/[0.02]"
+	class="group flex items-center gap-2.5 w-full h-7 px-2 rounded-lg cursor-pointer transition-colors duration-75
+		{isSelected
+		? 'bg-black/[0.04] dark:bg-white/[0.055]'
+		: 'hover:bg-black/[0.025] dark:hover:bg-white/[0.03]'}"
 	role="button"
 	tabindex="0"
 	{onclick}
@@ -61,11 +63,14 @@
 		<span class="size-1.5 shrink-0 rounded-full bg-sky-500" aria-hidden="true"></span>
 	{/if}
 	<span
-		class="flex-1 text-xs truncate min-w-0 {unread
+		class="flex-1 text-[0.8125rem] truncate min-w-0 transition-colors duration-75 {unread
 			? 'font-medium text-gray-900 dark:text-gray-100'
-			: 'text-gray-500 dark:text-gray-500'}">{chat.title}</span
+			: isSelected
+				? 'text-gray-900 dark:text-white'
+				: 'text-gray-700 dark:text-gray-300 group-hover:text-gray-900 dark:group-hover:text-white'}"
+		>{chat.title}</span
 	>
-	<span class="text-[0.625rem] text-gray-300 dark:text-gray-700 shrink-0 tabular-nums"
+	<span class="text-[0.75rem] text-gray-400 dark:text-gray-500 shrink-0 tabular-nums"
 		>{formatTime(chat.updated_at)}</span
 	>
 	{#if onmenu}

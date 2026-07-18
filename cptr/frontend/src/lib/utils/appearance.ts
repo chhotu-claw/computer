@@ -1,6 +1,9 @@
 import { setTextScale } from '$lib/utils/text-scale';
 
-export type Theme = 'dark' | 'light' | 'system';
+// 'dim' is a fork addition: a soft (non-OLED) dark theme. It resolves to the
+// dark palette but also toggles a `.theme-dim` class that lifts the near-black
+// surfaces to grey (see app.css two-tone shell).
+export type Theme = 'dark' | 'light' | 'system' | 'dim';
 
 export type ThemeColors = {
 	background?: string;
@@ -24,7 +27,7 @@ export type AppearancePreferences = {
 type ResolvedTheme = 'dark' | 'light';
 
 const DEFAULT_UI_FONT =
-	"'Inter', -apple-system, BlinkMacSystemFont, ui-sans-serif, system-ui, sans-serif";
+	"'Geist', 'Inter', -apple-system, BlinkMacSystemFont, ui-sans-serif, system-ui, sans-serif";
 export const DEFAULT_BORDER_CONTRAST = 1.5;
 export const DEFAULT_DIVIDER_CONTRAST = 0.875;
 export const MAX_BORDER_CONTRAST = 16;
@@ -93,7 +96,7 @@ export function sanitizeThemeConfig(value: unknown): ThemeConfig | null {
 export function defaultThemeConfig(theme: Theme): Required<ThemeColors> & { uiFont: string } {
 	const resolved = resolveThemeMode(theme);
 	return {
-		background: resolved === 'dark' ? '#000000' : '#ffffff',
+		background: theme === 'dim' ? '#181818' : resolved === 'dark' ? '#000000' : '#ffffff',
 		foreground: resolved === 'dark' ? '#d4d4d4' : '#525252',
 		uiFont: DEFAULT_UI_FONT
 	};
@@ -132,6 +135,7 @@ export function applyAppearance(
 			: Number(((borderMix * 2) / 3).toFixed(3));
 
 	document.documentElement.classList.toggle('dark', resolved === 'dark');
+	document.documentElement.classList.toggle('theme-dim', theme === 'dim');
 	document.documentElement.style.colorScheme = resolved;
 
 	setVar('--app-bg', merged.background);

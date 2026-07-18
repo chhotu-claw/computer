@@ -22,6 +22,7 @@
 	import { uploadFile } from '$lib/apis/files';
 	import type { ChatTask, ContextUsage } from '$lib/apis/chat';
 	import ModelSelector from '../common/ModelSelector.svelte';
+	import EffortSelector from '../common/EffortSelector.svelte';
 	import SendButton from './SendButton.svelte';
 	import PlusMenu from './PlusMenu.svelte';
 	import DictateButton from './DictateButton.svelte';
@@ -30,12 +31,14 @@
 	import AskUserCard from './AskUserCard.svelte';
 	import Icon from '../Icon.svelte';
 	import type { ToolApprovalMode } from '$lib/apis/chat';
+	import { chatModels } from '$lib/stores/chat';
 	import {
 		sttConfigured,
 		ttsConfigured,
 		ttsEnabled,
 		unlockTtsAudioPlayback,
-		voiceModeSttMode
+		voiceModeSttMode,
+		ttsSpeaking
 	} from '$lib/stores/audio';
 	import Spinner from '$lib/components/common/Spinner.svelte';
 	import { t } from '$lib/i18n';
@@ -65,6 +68,7 @@
 	interface Props {
 		inputText: string;
 		selectedModel: string;
+		selectedEffort?: string;
 		toolApprovalMode?: ToolApprovalMode;
 		planMode?: boolean;
 		requestParams?: Record<string, unknown>;
@@ -100,6 +104,7 @@
 	let {
 		inputText = $bindable(),
 		selectedModel = $bindable(),
+		selectedEffort = $bindable('default'),
 		toolApprovalMode = $bindable('auto'),
 		planMode = $bindable(false),
 		requestParams = $bindable({}),
@@ -693,6 +698,8 @@
 			voiceWaitingForResponse ||
 			voiceListening ||
 			voiceRecognition ||
+			voiceVadActive ||
+			$ttsSpeaking ||
 			streaming ||
 			sending ||
 			inputText.trim()
@@ -711,6 +718,7 @@
 		const recognition = voiceRecognition;
 		voiceRecognition = null;
 		voiceStopRequested = true;
+		if (voiceVadActive || voiceVadStream || voiceVadRecorder) cleanupVoiceVad();
 		if (stopCapture) stopVoiceCapture();
 		try {
 			recognition?.stop();
@@ -829,6 +837,216 @@
 		return (data?.text || '').trim();
 	}
 
+	// ── Provider-native voice loop (no browser SpeechRecognition) ──────────
+	// Used when STT mode is "provider" (or SpeechRecognition is unavailable —
+	// e.g. Brave, which blocks Google's web speech service). Records with
+	// MediaRecorder and detects end-of-turn with a Web Audio silence/VAD
+	// analyser, then transcribes through the configured STT provider. Reuses the
+	// same state machine (voiceListening / voiceWaitingForResponse / re-arm) as
+	// the browser path, so TTS playback and turn re-arming behave identically.
+	let voiceVadActive = false;
+	let voiceVadStream: MediaStream | null = null;
+	let voiceVadRecorder: MediaRecorder | null = null;
+	let voiceVadChunks: Blob[] = [];
+	let voiceVadMime = 'audio/webm';
+	let voiceVadCtx: AudioContext | null = null;
+	let voiceVadRaf = 0;
+	let voiceVadSpoke = false;
+	let voiceVadSpeechMs = 0;
+	let voiceVadSilenceMs = 0;
+	let voiceVadElapsedMs = 0;
+	let voiceVadLastTs = 0;
+
+	const VAD_RMS_THRESHOLD = 0.018; // mic RMS above this counts as speech
+	// Require a real amount of speech before a turn can end. A brief noise
+	// (cough, breath, background) under this won't trigger a turn, so near-silent
+	// audio is never sent to STT — which otherwise makes Whisper hallucinate
+	// phantom text. Real utterances comfortably exceed this, so latency is
+	// unaffected.
+	const VAD_MIN_SPEECH_MS = 500;
+	const VAD_SILENCE_MS = 1300; // end the turn after this much trailing silence
+	const VAD_MAX_WAIT_MS = 12000; // if no speech at all, re-arm after this
+
+	function cleanupVoiceVad() {
+		voiceVadActive = false;
+		if (voiceVadRaf) {
+			cancelAnimationFrame(voiceVadRaf);
+			voiceVadRaf = 0;
+		}
+		const rec = voiceVadRecorder;
+		voiceVadRecorder = null;
+		try {
+			if (rec && rec.state !== 'inactive') rec.stop();
+		} catch {}
+		voiceVadStream?.getTracks().forEach((tr) => tr.stop());
+		voiceVadStream = null;
+		voiceVadChunks = [];
+		try {
+			voiceVadCtx?.close();
+		} catch {}
+		voiceVadCtx = null;
+	}
+
+	async function startVoiceVad() {
+		voiceStopRequested = false;
+		if (typeof MediaRecorder === 'undefined' || !navigator.mediaDevices?.getUserMedia) {
+			toast.error($t('chat.dictate.unsupported'));
+			voiceModeEnabled = false;
+			return;
+		}
+		let stream: MediaStream;
+		try {
+			stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+		} catch {
+			voiceModeEnabled = false;
+			return;
+		}
+		if (!voiceModeEnabled || voiceStopRequested) {
+			stream.getTracks().forEach((tr) => tr.stop());
+			return;
+		}
+		try {
+			const mime = chooseVoiceCaptureMimeType();
+			const recorder = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
+			voiceVadStream = stream;
+			voiceVadRecorder = recorder;
+			voiceVadChunks = [];
+			voiceVadMime = recorder.mimeType || mime || 'audio/webm';
+			recorder.ondataavailable = (e) => {
+				if (e.data.size > 0) voiceVadChunks.push(e.data);
+			};
+			recorder.start();
+			const Ctx = (window as any).AudioContext || (window as any).webkitAudioContext;
+			const ctx: AudioContext = new Ctx();
+			voiceVadCtx = ctx;
+			// Chromium creates the context suspended when it's not made in the direct
+			// gesture tick (we awaited getUserMedia first). A suspended context feeds
+			// the analyser silence, so no speech is ever detected — resume it.
+			try {
+				if (ctx.state === 'suspended') await ctx.resume();
+			} catch {}
+			const analyser = ctx.createAnalyser();
+			analyser.fftSize = 1024;
+			ctx.createMediaStreamSource(stream).connect(analyser);
+			const buf = new Uint8Array(analyser.fftSize);
+			voiceVadSpoke = false;
+			voiceVadSpeechMs = 0;
+			voiceVadSilenceMs = 0;
+			voiceVadElapsedMs = 0;
+			voiceVadLastTs = performance.now();
+			voiceVadActive = true;
+			voiceListening = true;
+			voiceRearming = false;
+			const tick = () => {
+				if (!voiceVadActive) return;
+				analyser.getByteTimeDomainData(buf);
+				let sum = 0;
+				for (let i = 0; i < buf.length; i++) {
+					const v = (buf[i] - 128) / 128;
+					sum += v * v;
+				}
+				const rms = Math.sqrt(sum / buf.length);
+				const now = performance.now();
+				const dt = now - voiceVadLastTs;
+				voiceVadLastTs = now;
+				voiceVadElapsedMs += dt;
+				if (rms > VAD_RMS_THRESHOLD) {
+					voiceVadSpoke = true;
+					voiceVadSpeechMs += dt;
+					voiceVadSilenceMs = 0;
+				} else if (voiceVadSpoke) {
+					voiceVadSilenceMs += dt;
+				}
+				if (
+					voiceVadSpoke &&
+					voiceVadSpeechMs >= VAD_MIN_SPEECH_MS &&
+					voiceVadSilenceMs >= VAD_SILENCE_MS
+				) {
+					void finishVoiceVadTurn();
+					return;
+				}
+				if (!voiceVadSpoke && voiceVadElapsedMs >= VAD_MAX_WAIT_MS) {
+					cleanupVoiceVad();
+					voiceListening = false;
+					scheduleVoiceRestart(300);
+					return;
+				}
+				voiceVadRaf = requestAnimationFrame(tick);
+			};
+			voiceVadRaf = requestAnimationFrame(tick);
+		} catch (err: any) {
+			cleanupVoiceVad();
+			voiceListening = false;
+			voiceModeEnabled = false;
+			toast.error(`Voice mode could not start${err?.message ? `: ${err.message}` : ''}`);
+		}
+	}
+
+	async function finishVoiceVadTurn() {
+		if (voiceVadRaf) {
+			cancelAnimationFrame(voiceVadRaf);
+			voiceVadRaf = 0;
+		}
+		voiceVadActive = false;
+		voiceListening = false;
+		const recorder = voiceVadRecorder;
+		voiceVadRecorder = null;
+		const stream = voiceVadStream;
+		voiceVadStream = null;
+		const contentType = voiceVadMime || 'audio/webm';
+		try {
+			voiceVadCtx?.close();
+		} catch {}
+		voiceVadCtx = null;
+		if (recorder) {
+			await new Promise<void>((resolve) => {
+				recorder.onstop = () => resolve();
+				try {
+					if (recorder.state !== 'inactive') recorder.stop();
+					else resolve();
+				} catch {
+					resolve();
+				}
+			});
+		}
+		stream?.getTracks().forEach((tr) => tr.stop());
+		// Read chunks AFTER stop: with no timeslice, MediaRecorder only emits data
+		// via ondataavailable on stop, pushing it into voiceVadChunks. Reading or
+		// resetting before stop captures an empty array and silently drops the audio.
+		const chunks = voiceVadChunks;
+		voiceVadChunks = [];
+		if (!chunks.length) {
+			scheduleVoiceRestart(400);
+			return;
+		}
+		const ext = contentType.includes('mp4') ? 'm4a' : 'webm';
+		const capture = {
+			blob: new Blob(chunks, { type: contentType }),
+			filename: `voice-mode.${ext}`,
+			contentType
+		};
+		voiceWaitingForResponse = true;
+		voiceSawStreaming = false;
+		let text = '';
+		try {
+			text = await transcribeVoiceModeCapture(capture);
+		} catch (err: any) {
+			const detail = err?.message ? ` ${err.message}` : '';
+			toast.error(`${$t('chat.voiceProviderSttFallback')}${detail}`);
+			voiceWaitingForResponse = false;
+			scheduleVoiceRestart(800);
+			return;
+		}
+		if (!text.trim()) {
+			voiceWaitingForResponse = false;
+			scheduleVoiceRestart(400);
+			return;
+		}
+		inputText = text;
+		await tick();
+		handleSubmit();
+	}
+
 	function startVoiceRecognition() {
 		clearVoiceRestartTimer(false);
 		if (
@@ -837,6 +1055,8 @@
 			voiceWaitingForResponse ||
 			voiceListening ||
 			voiceRecognition ||
+			voiceVadActive ||
+			$ttsSpeaking ||
 			streaming ||
 			sending ||
 			inputText.trim()
@@ -847,10 +1067,10 @@
 
 		const SpeechRecognition =
 			(window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-		if (!SpeechRecognition) {
-			alert($t('chat.dictate.unsupported'));
-			voiceModeEnabled = false;
-			voiceRearming = false;
+		// Provider STT, or no browser speech recognition (e.g. Brave): use the
+		// provider-native recorder+VAD loop instead of Google's web speech service.
+		if ($voiceModeSttMode === 'provider' || !SpeechRecognition) {
+			void startVoiceVad();
 			return;
 		}
 
@@ -957,7 +1177,7 @@
 		}
 		if (!voiceModeEnabled) return;
 		if (streaming) voiceSawStreaming = true;
-		if (voiceSawStreaming && !streaming && !sending) {
+		if (voiceSawStreaming && !streaming && !sending && !$ttsSpeaking) {
 			voiceWaitingForResponse = false;
 			voiceSawStreaming = false;
 			scheduleVoiceRestart(500);
@@ -1002,6 +1222,27 @@
 	const contextPercent = $derived(Math.max(0, Math.round(contextUsage?.percent ?? 0)));
 	const contextCirclePercent = $derived(Math.min(contextPercent, 100));
 	const contextCircleOffset = $derived(50.27 * (1 - contextCirclePercent / 100));
+	// Composer meter: hidden below 50% (zero chrome for short chats), amber past 80%.
+	const showContextMeter = $derived(!!contextUsage && contextPercent >= 50);
+	const contextMeterAmber = $derived(contextPercent >= 80);
+	const contextTooltip = $derived(
+		contextUsage
+			? $t('chat.contextMeterTooltip', {
+					used: formatTokenCount(contextUsage.estimated_tokens || contextUsage.tokens),
+					total: formatTokenCount(contextUsage.threshold)
+				})
+			: ''
+	);
+
+	function formatTokenCount(value: number): string {
+		if (value >= 1_000_000) return `${trimTokenNumber(value / 1_000_000)}m`;
+		if (value >= 1_000) return `${trimTokenNumber(value / 1_000)}k`;
+		return String(value);
+	}
+
+	function trimTokenNumber(value: number): string {
+		return value >= 10 ? String(Math.round(value)) : value.toFixed(1).replace(/\.0$/, '');
+	}
 
 	$effect(() => {
 		if (selectedSlashCommandIndex >= slashSuggestionIds.length) selectedSlashCommandIndex = 0;
@@ -1555,10 +1796,27 @@
 						</svg>
 					</button>
 				{/if}
+				{#if showContextMeter}
+					<span
+						class="px-1 text-[0.6875rem] tabular-nums leading-none transition-colors duration-150 {contextMeterAmber
+							? 'text-amber-500/90 dark:text-amber-400/80'
+							: 'text-gray-400 dark:text-gray-500'}"
+						title={contextTooltip}
+					>
+						{contextPercent}%
+					</span>
+				{/if}
 			</div>
 			<div class="self-end mr-1 flex items-center gap-2">
 				<ModelSelector bind:selectedModel onchange={onsettingschange} />
+				<EffortSelector
+					bind:selectedEffort
+					disabled={!selectedModel}
+					inheritedEffort={$chatModels.find((m) => m.id === selectedModel)
+						?.default_reasoning_effort}
+				/>
 				<DictateButton
+					{workspace}
 					ontext={(text) => {
 						inputText += text;
 					}}
