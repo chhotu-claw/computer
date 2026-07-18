@@ -296,6 +296,22 @@ async def stream_anthropic(
         "max_tokens": 4096,
     }
     if request_params:
+        # reasoning_effort is OpenAI-flavored; Anthropic's native body uses `thinking`.
+        # Translate it to an extended-thinking budget so the request stays valid.
+        request_params = dict(request_params)
+        effort = request_params.pop("reasoning_effort", None)
+        if effort:
+            budget = {"minimal": 1024, "low": 4096, "medium": 8192, "high": 16384}.get(
+                str(effort).lower()
+            )
+            if budget:
+                body["thinking"] = {"type": "enabled", "budget_tokens": budget}
+                # Anthropic requires max_tokens > thinking.budget_tokens.
+                body["max_tokens"] = max(body.get("max_tokens") or 0, budget + 4096)
+            else:
+                logger.warning(
+                    "[stream] anthropic: dropping unrecognized reasoning_effort=%r", effort
+                )
         body.update(request_params)
     # Remove None values
     body = {k: v for k, v in body.items() if v is not None}

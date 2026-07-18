@@ -1498,6 +1498,15 @@ async def run_chat_task(
 ):
     """Plain async function. Makes raw API calls in a loop."""
 
+    # `workspace` is the chat's identity ("" for project-less Home chats) and is
+    # used for events, storage and memory. `tool_workspace` is where tools and
+    # coding agents actually run: the workspace path when present, otherwise the
+    # chat's isolated scratch dir (~/.cptr/scratch/<chat_id>). Keep them distinct
+    # so Home chats stay "Home" in the UI while still having a real cwd to work in.
+    from cptr.utils.workspace import resolve_tool_cwd
+
+    tool_workspace = resolve_tool_cwd(workspace, chat_id)
+
     async def emit(**data):
         """Stream an output delta to the user."""
         try:
@@ -1664,7 +1673,7 @@ async def run_chat_task(
         )
         memory_message, memory_files = _memory_recall_inputs(messages, regeneration_prompt)
         system = await _load_system_prompt(
-            workspace,
+            tool_workspace,
             agent_target.full_model_id,
             user_id=user_id,
             current_message=memory_message,
@@ -1680,7 +1689,7 @@ async def run_chat_task(
             if isinstance(meta_files, list):
                 current_user_files = meta_files
         agent_attachments = await prepare_agent_attachments(
-            workspace=workspace,
+            workspace=tool_workspace,
             chat_id=chat_id,
             message_id=(msg.parent_id if msg and msg.parent_id else message_id),
             files=current_user_files,
@@ -1736,7 +1745,7 @@ async def run_chat_task(
         async for event in runner(
             profile=agent_target.config,
             model=agent_target.model,
-            workspace=workspace,
+            workspace=tool_workspace,
             messages=messages,
             system_prompt=system,
             chat_params=chat_params,
@@ -1972,7 +1981,7 @@ async def run_chat_task(
         )
         memory_message, memory_files = _memory_recall_inputs(messages, regeneration_prompt)
         system = await _load_system_prompt(
-            workspace,
+            tool_workspace,
             model,
             user_id=user_id,
             current_message=memory_message,
@@ -1983,12 +1992,12 @@ async def run_chat_task(
             system += f"\n\n[CONVERSATION SUMMARY]\n{loaded_summary}"
         if regeneration_prompt:
             messages.append({"role": "user", "content": regeneration_prompt})
-        tools = await get_tool_list(builtin_tools=builtin_tools, workspace=workspace)
+        tools = await get_tool_list(builtin_tools=builtin_tools, workspace=tool_workspace)
         if not skill_authoring_allowed:
             tools = [t for t in tools if t["name"] != "manage_skill"]
 
         # Remove view_skill tool if no skills are available
-        skills = discover_skills(workspace) if skill_settings["enabled"] else []
+        skills = discover_skills(tool_workspace) if skill_settings["enabled"] else []
         if not skills:
             tools = [t for t in tools if t["name"] != "view_skill"]
 
@@ -2086,6 +2095,9 @@ async def run_chat_task(
         )
         compact_token_threshold = compact_token_threshold or resolve_compact_token_threshold()
         request_params = {**global_rp, **model_rp, **chat_request_params} or None
+        # Effective reasoning effort (if any) — stamped onto the assistant message usage
+        # so the client can surface it in the usage tooltip.
+        effective_effort = (request_params or {}).get("reasoning_effort")
 
         for _iteration in range(CHAT_MAX_ITERATIONS):
             # ── Context compaction: summarize older messages if too large ──
@@ -2121,7 +2133,7 @@ async def run_chat_task(
                 # Append summary to system prompt (works for all providers)
                 memory_message, memory_files = _memory_recall_inputs(keep_zone, regeneration_prompt)
                 system = await _load_system_prompt(
-                    workspace,
+                    tool_workspace,
                     model,
                     user_id=user_id,
                     current_message=memory_message,
@@ -2295,6 +2307,8 @@ async def run_chat_task(
 
                 elif event["type"] == "usage":
                     usage = normalize_usage({k: v for k, v in event.items() if k != "type"})
+                    if effective_effort and usage:
+                        usage["reasoning_effort"] = effective_effort
                     last_usage = usage
                     new_messages_since = 0
                     tokens = usage_context_tokens(usage)
@@ -2325,11 +2339,17 @@ async def run_chat_task(
                                     threshold=compact_token_threshold,
                                 )
                             )
+                        done_usage = last_usage
+                        if effective_effort:
+                            done_usage = {
+                                **(done_usage or {}),
+                                "reasoning_effort": effective_effort,
+                            }
                         await _save_message(
                             "done",
                             content=content,
                             output=output_items,
-                            usage=last_usage,
+                            usage=done_usage,
                             done=True,
                         )
                         _task_state.pop(message_id, None)
@@ -2358,7 +2378,7 @@ async def run_chat_task(
                 flushed_item = _flush_text()
 
                 tool_ctx = {
-                    "workspace": workspace,
+                    "workspace": tool_workspace,
                     "user_id": user_id,
                     "model_id": model,
                     "full_model_id": ((chat_obj.meta or {}).get("last_model") if chat_obj else None)
@@ -2542,7 +2562,7 @@ async def run_chat_task(
                     if tc["name"] == "create_artifact":
                         args = dict(tc["arguments"])
                         args.pop("workspace", None)
-                        result = await create_artifact(**args, workspace=workspace)
+                        result = await create_artifact(**args, workspace=tool_workspace)
                     else:
                         result = await execute_tool(
                             tc["name"],
@@ -2656,11 +2676,17 @@ async def run_chat_task(
                 flushed_item = _flush_text()
                 if flushed_item:
                     await emit(output=flushed_item)
+                end_usage = last_usage
+                if effective_effort:
+                    end_usage = {
+                        **(end_usage or {}),
+                        "reasoning_effort": effective_effort,
+                    }
                 await _save_message(
                     "end",
                     content=content,
                     output=output_items,
-                    usage=last_usage,
+                    usage=end_usage,
                     done=True,
                 )
                 _task_state.pop(message_id, None)

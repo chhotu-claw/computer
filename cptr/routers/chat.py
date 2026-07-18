@@ -321,6 +321,19 @@ async def get_models(request: Request):
     if inactive:
         models = [m for m in models if m["id"] not in inactive]
 
+    # Surface the configured default reasoning effort (per-model request_params
+    # over global "*") so the composer can show what applies when unset.
+    def _request_params(cfg_key: str) -> dict:
+        return ((chat_models_config.get(cfg_key) or {}).get("params") or {}).get(
+            "request_params"
+        ) or {}
+
+    global_effort = _request_params("*").get("reasoning_effort")
+    for m in models:
+        effort = _request_params(m["id"]).get("reasoning_effort") or global_effort
+        if effort:
+            m["default_reasoning_effort"] = effort
+
     return {"models": models, "default": default_model}
 
 
@@ -726,7 +739,7 @@ async def send_message(body: SendMessageRequest, request: Request):
     """
     user_id = _get_user(request)
 
-    from cptr.utils.model_targets import AgentModelTarget, resolve_model_target
+    from cptr.utils.model_targets import resolve_model_target
 
     target = await resolve_model_target(body.model_id, request.app.state)
 
@@ -736,8 +749,8 @@ async def send_message(body: SendMessageRequest, request: Request):
         if not chat or chat.user_id != user_id:
             raise HTTPException(404, "chat not found")
         workspace = (chat.meta or {}).get("workspace") or None
-        if not workspace and isinstance(target, AgentModelTarget):
-            raise HTTPException(400, "Home chats require an API model")
+        # Home (project-less) chats are allowed for both API models and coding
+        # agents; agents run in the chat's isolated scratch dir (see chat_task).
         # Sync params into chat meta
         if chat.meta is None:
             chat.meta = {}
@@ -747,8 +760,6 @@ async def send_message(body: SendMessageRequest, request: Request):
             await Chat.update_meta(chat.id, chat.meta)
     else:
         workspace = body.workspace or None
-        if not workspace and isinstance(target, AgentModelTarget):
-            raise HTTPException(400, "Home chats require an API model")
         title = body.content[:50].strip() or "New Chat"
         meta = {
             "params": body.params,

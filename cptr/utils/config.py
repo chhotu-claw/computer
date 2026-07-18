@@ -93,8 +93,14 @@ def _parse_simple_toml(text: str) -> dict:
             # Strip quotes
             if value.startswith('"') and value.endswith('"'):
                 value = value[1:-1]
-                # Unescape
-                value = value.replace('\\"', '"').replace("\\\\", "\\")
+                # Unescape (reverse of save order: specials first, backslash last)
+                value = (
+                    value.replace('\\"', '"')
+                    .replace("\\n", "\n")
+                    .replace("\\r", "\r")
+                    .replace("\\t", "\t")
+                    .replace("\\\\", "\\")
+                )
             elif value.startswith("'") and value.endswith("'"):
                 value = value[1:-1]
             elif value == "true":
@@ -124,8 +130,16 @@ def save_config(config: dict):
                 # Quote keys that contain dots (e.g. "auth.signup_enabled")
                 key_str = f'"{k}"' if "." in k else k
                 if isinstance(v, str):
-                    # Escape backslashes and quotes in string values
-                    escaped = v.replace("\\", "\\\\").replace('"', '\\"')
+                    # Escape backslashes and quotes (backslash first), plus
+                    # newlines/tabs so multi-line values stay valid TOML instead
+                    # of corrupting the file and wiping config on next load.
+                    escaped = (
+                        v.replace("\\", "\\\\")
+                        .replace('"', '\\"')
+                        .replace("\n", "\\n")
+                        .replace("\r", "\\r")
+                        .replace("\t", "\\t")
+                    )
                     lines.append(f'{key_str} = "{escaped}"')
                 elif isinstance(v, bool):
                     lines.append(f"{key_str} = {'true' if v else 'false'}")

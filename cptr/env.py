@@ -28,6 +28,13 @@ DATA_DIR = Path(os.environ.get("CPTR_DATA_DIR", str(Path.home() / ".cptr")))
 CONFIG_FILE = DATA_DIR / "config.toml"
 DB_FILE = DATA_DIR / "app.db"
 
+# Per-chat scratch working directories for project-less ("Home") chats.
+# A Home chat has no workspace, so its tools and coding agents run in an
+# isolated dir here (scratch/<chat_id>) instead of the server's process cwd.
+# Each chat gets its own dir so ad-hoc chats never collide and any one of them
+# can later be promoted into a real project. See cptr.utils.workspace.
+SCRATCH_DIR = DATA_DIR / "scratch"
+
 # ── Logging ─────────────────────────────────────────────────
 LOG_LEVEL = os.environ.get("CPTR_LOG_LEVEL", "INFO").upper()
 LOG_FORMAT = os.environ.get("CPTR_LOG_FORMAT", "text").lower()
